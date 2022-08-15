@@ -1,5 +1,9 @@
 package tv.wlg.console;
 
+import io.chatplays.console.input.Parser;
+import io.chatplays.console.input.Validator;
+import io.chatplays.console.input.parsers.*;
+import io.chatplays.console.input.validator.*;
 import redlaboratory.jvjoyinterface.VJoy;
 import redlaboratory.jvjoyinterface.VjdStat;
 import tv.wlg.chat.Message;
@@ -18,17 +22,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-@SuppressWarnings({"RegExpRedundantEscape", "RegExpSingleCharAlternation"})
 public class GamePad {
     private final String helpButtons;
-    private static final String expandRegex = "\\[([^\\[\\]]*)\\](\\*|x)(\\d{1,2})";
-    private static final String expandTimeRegex = "\\[([^\\[\\]]*)\\](?<time>(?<duration>\\d+)(?<type>ms|s))";
 
     @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
     private final Map<String, Integer> buttons;
     private final Pattern pattern;
-    private final Pattern expandPattern = Pattern.compile(expandRegex, Pattern.MULTILINE);
-    private final Pattern expandTimePattern = Pattern.compile(expandTimeRegex, Pattern.MULTILINE);
 
     private final VJoy vJoy;
     private final int deviceId = 1;
@@ -39,6 +38,9 @@ public class GamePad {
     private final Queue<ScheduledFuture<?>> sequence = new ConcurrentLinkedQueue<>();
 
     private static final Path userCommand = Paths.get("./action/command.txt");
+
+    private final List<Parser> parsers;
+    private final List<Validator> validators;
 
     public GamePad(ThreadPoolManager threadPoolManager, String type) {
         String regex;
@@ -165,6 +167,15 @@ public class GamePad {
             }};
         }
 
+        this.parsers = new ArrayList<>();
+        this.parsers.add(new TrimParser());
+        this.parsers.add(new LowerCaseParser());
+        this.parsers.add(new RepeatParser());
+        this.parsers.add(new ShortTimeParser(pattern));
+
+        this.validators = new ArrayList<>();
+        this.validators.add(new CommandValid(pattern));
+
         //Initialize VJoy gamepad
         this.vJoy = initVJoy();
         this.threadPoolManager = threadPoolManager;
@@ -173,16 +184,14 @@ public class GamePad {
     public void feed(Message message) {
         String originalMessage = message.getMessage();
 
-        //PreParsers
-        message.setMessage(message.getMessage().trim()); //trip
-        message.setMessage(message.getMessage().toLowerCase()); //to Lower Case
-        message.setMessage(message.getMessage().replace(" ", "")); //remove all spaces
-        message.setMessage(expandMessage(message));
-        message.setMessage(expandTimeMessage(message));
+        for (Parser parser : parsers) {
+            message.setMessage(parser.parse(message.getMessage()));
+        }
 
-        //validators
-        if (!isValidInput(message)) {
-            return;
+        for (Validator validator : validators) {
+            if (!validator.isValid(message.getMessage())) {
+                return;
+            }
         }
 
         Future<?> future = threadPoolManager.getSequenceExecutor().submit(new ParserExecutor(message, originalMessage));
@@ -207,71 +216,6 @@ public class GamePad {
         vJoy.resetVJD(deviceId);
         vJoy.resetPovs(deviceId);
         vJoy.resetButtons(deviceId);
-    }
-
-    private String expandMessage(Message message) {
-        final Matcher matcher = expandPattern.matcher(message.getMessage());
-
-        StringBuilder stringBuilder = new StringBuilder();
-        int lastMatch = 0;
-        while (matcher.find()) {
-            stringBuilder.append(message.getMessage(), lastMatch, matcher.start());
-            if (matcher.group(3) != null) {
-                int repeat = Integer.parseInt(matcher.group(3));
-                stringBuilder.append(String.valueOf(matcher.group(1)).repeat(Math.max(0, repeat)));
-            }
-            lastMatch = matcher.end();
-        }
-        stringBuilder.append(message.getMessage(), lastMatch, message.getMessage().length());
-
-        return stringBuilder.toString();
-    }
-
-    private String expandTimeMessage(Message message) {
-        final Matcher matcher = expandTimePattern.matcher(message.getMessage());
-
-        StringBuilder stringBuilder = new StringBuilder();
-        int lastMatch = 0;
-        while (matcher.find()) {
-            stringBuilder.append(message.getMessage(), lastMatch, matcher.start());
-            if (matcher.group("time") != null) {
-                String time = matcher.group("time");
-
-                final Matcher inputMatcher = pattern.matcher(matcher.group(1));
-                StringBuilder inputString = new StringBuilder();
-                while (inputMatcher.find()) {
-                    if (inputMatcher.group("time") == null) {
-                        if (inputMatcher.group("plus") == null) {
-                            inputString.append(inputMatcher.group(0)).append(time);
-                        } else {
-                            inputString.append(inputMatcher.group(0), 0, inputMatcher.group(0).length() - 1).append(time).append("+");
-                        }
-                    } else {
-                        inputString.append(inputMatcher.group(0));
-                    }
-                }
-                stringBuilder.append(inputString);
-            }
-            lastMatch = matcher.end();
-        }
-        stringBuilder.append(message.getMessage(), lastMatch, message.getMessage().length());
-
-        return stringBuilder.toString();
-    }
-
-    private boolean isValidInput(Message message) {
-        final Matcher matcher = pattern.matcher(message.getMessage());
-
-        int lastMatch = 0;
-        while (matcher.find()) {
-            if (lastMatch != matcher.start()) {
-                return false;
-            }
-
-            lastMatch = matcher.end();
-        }
-
-        return lastMatch == message.getMessage().length();
     }
 
     public String getRules() {
